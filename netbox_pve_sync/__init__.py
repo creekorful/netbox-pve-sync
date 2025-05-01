@@ -220,6 +220,10 @@ def _process_pve_virtual_machine_network_interface(
         _interface_vlan_id: Optional[int],
         _pve_virtual_machine_ip_addresses: dict,
 ) -> dict:
+    print(
+        f'_process_pve_virtual_machine_network_interface(_nb_api, _nb_objects, {_nb_virtual_machine.serial}, {_interface_name}, {_interface_mac_address}, {_interface_vlan_id}, {_pve_virtual_machine_ip_addresses})'
+    )
+
     nb_virtual_machines_interface = _nb_objects['virtual_machines_interfaces'] \
         .get(_nb_virtual_machine.id, {}) \
         .get(_interface_name)
@@ -229,6 +233,10 @@ def _process_pve_virtual_machine_network_interface(
             virtual_machine=_nb_virtual_machine.id,
             name=_interface_name,
             description=_interface_mac_address,
+        )
+
+        print(
+            f'_nb_api.virtualization.interfaces.create(virtual_machine={_nb_virtual_machine.id}, name={_nb_virtual_machine.name}, description={_interface_mac_address}) = {nb_virtual_machines_interface} ({nb_virtual_machines_interface.id})'
         )
 
         if _nb_virtual_machine.id not in _nb_objects['virtual_machines_interfaces']:
@@ -244,6 +252,10 @@ def _process_pve_virtual_machine_network_interface(
             mac_address=_interface_mac_address,
             assigned_object_type='virtualization.vminterface',
             assigned_object_id=nb_virtual_machines_interface.id,
+        )
+
+        print(
+            f'_nb_api.dcim.mac_addresses.create(mac_address={_interface_mac_address}, assigned_object_type=virtualization.vminterface, assigned_object_id={nb_virtual_machines_interface.id}) = {nb_mac_address}'
         )
 
         _nb_objects['mac_addresses'][_interface_mac_address] = nb_mac_address
