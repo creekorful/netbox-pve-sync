@@ -143,7 +143,7 @@ def _process_pve_virtual_machine(
     else:
         nb_virtual_machine.name = _pve_virtual_machine['name']
         nb_virtual_machine.site = _nb_device.site.id
-        nb_virtual_machine.cluster = 1
+        nb_virtual_machine.cluster = os.environ.get('NB_CLUSTER_ID', 1)
         nb_virtual_machine.device = _nb_device.id
         nb_virtual_machine.vcpus = pve_virtual_machine_config['cores']
         nb_virtual_machine.memory = int(pve_virtual_machine_config['memory'])

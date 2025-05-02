@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Use `NB_CLUSTER_ID` even for VM update.
+
 ## [0.2.1] - 01/05/2025
 
 ### Fixed
