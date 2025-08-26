@@ -391,6 +391,8 @@ def _process_pve_disk_size(_raw_disk_size: str) -> int:
     size = _raw_disk_size[:-1]
     size_unit = _raw_disk_size[-1]
 
+    if size_unit == 'M':
+        return int(size)
     if size_unit == 'G':
         return int(size) * 1_000
     if size_unit == 'T':
