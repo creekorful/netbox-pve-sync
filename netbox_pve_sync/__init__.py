@@ -130,7 +130,7 @@ def _process_pve_virtual_machine(
             site=_nb_device.site.id,
             cluster=os.environ.get('NB_CLUSTER_ID', 1),
             device=_nb_device.id,
-            vcpus=pve_virtual_machine_config['cores'],
+            vcpus=_get_virtual_machine_vcpus(pve_virtual_machine_config),
             memory=int(pve_virtual_machine_config['memory']),
             status='active' if _pve_virtual_machine['status'] == 'running' else 'offline',
             tags=list(map(lambda _pve_tag_name: _nb_objects['tags'][_pve_tag_name].id, _pve_tags)),
@@ -145,7 +145,7 @@ def _process_pve_virtual_machine(
         nb_virtual_machine.site = _nb_device.site.id
         nb_virtual_machine.cluster = os.environ.get('NB_CLUSTER_ID', 1)
         nb_virtual_machine.device = _nb_device.id
-        nb_virtual_machine.vcpus = pve_virtual_machine_config['cores']
+        nb_virtual_machine.vcpus = _get_virtual_machine_vcpus(pve_virtual_machine_config)
         nb_virtual_machine.memory = int(pve_virtual_machine_config['memory'])
         nb_virtual_machine.status = 'active' if _pve_virtual_machine['status'] == 'running' else 'offline'
         nb_virtual_machine.tags = list(map(lambda _pve_tag_name: _nb_objects['tags'][_pve_tag_name].id, _pve_tags))
@@ -399,6 +399,13 @@ def _process_pve_disk_size(_raw_disk_size: str) -> int:
         return int(size) * 1_000_000
 
     return -1
+
+
+def _get_virtual_machine_vcpus(_pve_virtual_machine_config: dict) -> int:
+    if 'vcpus' in _pve_virtual_machine_config:
+        return _pve_virtual_machine_config['vcpus']
+
+    return _pve_virtual_machine_config['cores'] * _pve_virtual_machine_config['sockets']
 
 
 def main():
