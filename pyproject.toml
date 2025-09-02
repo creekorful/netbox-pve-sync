@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-pve-sync"
-version = "0.2.3"
+version = "0.2.4"
 authors = [
     { name = "Aloïs Micard", email = "alois@micard.lu" },
 ]

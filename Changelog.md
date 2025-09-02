@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 02/09/2025
+
+### Fixed
+
+- Import vCPU core count instead of total available cores.
+
 ## [0.2.3] - 26/08/2025
 
 ### Fixed
