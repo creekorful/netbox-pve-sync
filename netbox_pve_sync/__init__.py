@@ -24,6 +24,8 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
         'vlans': {},
         'disks': {},
         'tags': {},
+        # filled later with IDs
+        'default_tag_ids': [],
     }
 
     # Load NetBox devices
