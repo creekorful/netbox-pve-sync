@@ -500,7 +500,8 @@ def main():
     # Read default tags from env and ensure they exist
     default_tag_names = [t.strip() for t in os.getenv('NB_SYNC_TAGS', '').split(',') if t.strip()]
     _ensure_tags_exist(nb_api, nb_objects, default_tag_names)
-    nb_objects['default_tag_ids'] = [nb_objects['tags'][n].id for n in default_tag_names]
+    # Map to IDs using the aliases we just established
+    nb_objects['default_tag_ids'] = [nb_objects['tags'][n].id for n in default_tag_names if n in nb_objects['tags']]
 
     # Process Proxmox tags
     _process_pve_tags(
