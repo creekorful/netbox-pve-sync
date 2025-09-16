@@ -1,5 +1,6 @@
 # netbox-pve-sync
 
+<<<<<<< HEAD
 Synchronize Proxmox Virtual Environment (PVE) information to a NetBox instance.
 This allows automatic tracking of Virtual Machines, disks, IP addresses/prefixes, MAC addresses, VLANs, ...
 
@@ -65,3 +66,10 @@ You can then execute the script using the following command:
 ```
 PVE_API_HOST=xx PVE_API_USER=xx PVE_API_TOKEN=xx PVE_API_SECRET=xx NB_API_URL=xx NB_API_TOKEN=xx nbpxsync
 ```
+
+### Default tags
+Set `NB_SYNC_TAGS` to a comma-separated list of tags you want applied to every synced object.
+
+Example:
+NB_SYNC_TAGS="Netbox-Synced,source:my-proxmox-cluster"
+

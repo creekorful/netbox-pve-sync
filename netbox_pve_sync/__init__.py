@@ -12,6 +12,8 @@ import pynetbox
 import urllib3
 from proxmoxer import ProxmoxAPI, ResourceException
 
+import re
+from pynetbox.core.query import RequestError
 
 def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
     _nb_objects = {
@@ -24,6 +26,8 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
         'vlans': {},
         'disks': {},
         'tags': {},
+        # filled later with IDs
+        'default_tag_ids': [],
     }
 
     # Load NetBox devices
@@ -70,6 +74,58 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
 
     return _nb_objects
 
+def _slugify_tag(_name: str) -> str:
+    # approximate NetBox slug rules: lowercase, non-alnum -> single dash, trim
+    s = _name.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
+
+def _ensure_tags_exist(_nb_api: pynetbox.api, _nb_objects: dict, _names: list[str]) -> None:
+    """
+    Ensure each requested tag exists in NetBox.
+    - Prefer exact NAME match from cache.
+    - Otherwise try SLUG lookup.
+    - Otherwise create; on conflict, resolve by fetching and caching.
+    Also: alias the resolved tag object under the *requested name* so later lookups
+    like _nb_objects['tags'][requested_name] work even if the actual tag has a different name.
+    """
+    if not _names:
+        return
+    for _name in _names:
+        if not _name:
+            continue
+        # 1) Already cached by this exact name?
+        _tag = _nb_objects['tags'].get(_name)
+        if _tag:
+            # also alias (no-op) and continue
+            _nb_objects['tags'][_name] = _tag
+            continue
+
+        # 2) Try slug lookup
+        _slug = _slugify_tag(_name)
+        _tag = _nb_api.extras.tags.get(slug=_slug)
+        if _tag:
+            # cache under its real name AND under the requested name (alias)
+            _nb_objects['tags'][_tag.name] = _tag
+            _nb_objects['tags'][_name] = _tag
+            continue
+
+        # 3) Create, but be resilient to races / conflicts
+        try:
+            _tag = _nb_api.extras.tags.create(
+                name=_name,
+                slug=_slug,
+                description=f'netbox-pve-sync default tag: {_name}',
+            )
+        except RequestError as e:
+            # If slug or name exists, fetch it and keep going
+            _tag = _nb_api.extras.tags.get(slug=_slug) or _nb_api.extras.tags.get(name=_name)
+            if _tag is None:
+                # unknown error → re-raise
+                raise
+        # cache under both keys
+        _nb_objects['tags'][_tag.name] = _tag
+        _nb_objects['tags'][_name] = _tag
 
 def _process_pve_tags(
         _pve_api: ProxmoxAPI,
@@ -225,11 +281,15 @@ def _process_pve_virtual_machine_network_interface(
         .get(_interface_name)
 
     if nb_virtual_machines_interface is None:
-        nb_virtual_machines_interface = _nb_api.virtualization.interfaces.create(
+        payload = dict(
             virtual_machine=_nb_virtual_machine.id,
             name=_interface_name,
             description=_interface_mac_address,
         )
+
+        if _nb_objects['default_tag_ids']:
+            payload['tags'] = _nb_objects['default_tag_ids']
+        nb_virtual_machines_interface = _nb_api.virtualization.interfaces.create(**payload)
 
         if _nb_virtual_machine.id not in _nb_objects['virtual_machines_interfaces']:
             _nb_objects['virtual_machines_interfaces'][_nb_virtual_machine.id] = {}
@@ -279,12 +339,15 @@ def _process_pve_virtual_machine_network_interface(
 
         nb_ip_address = _nb_objects['ip_addresses'].get(_virtual_machine_full_address)
         if nb_ip_address is None:
-            nb_ip_address = _nb_api.ipam.ip_addresses.create(
+            payload = dict(
                 address=_virtual_machine_full_address,
                 assigned_object_type='virtualization.vminterface',
                 assigned_object_id=nb_virtual_machines_interface.id,
                 dns_name=ip_address_dns_name
             )
+            if _nb_objects['default_tag_ids']:
+                payload['tags'] = _nb_objects['default_tag_ids']
+            nb_ip_address = _nb_api.ipam.ip_addresses.create(**payload)
             _nb_objects['ip_addresses'][nb_ip_address.address] = nb_ip_address
         else:
             nb_ip_address.assigned_object_type = 'virtualization.vminterface'
@@ -348,7 +411,7 @@ def _process_pve_virtual_machine_disk(
 ) -> dict:
     nb_disk = _nb_objects['disks'].get(_nb_virtual_machine.id, {}).get(_disk_name)
     if nb_disk is None:
-        _nb_api.virtualization.virtual_disks.create(
+        payload = dict(
             name=_disk_name,
             size=_disk_size,
             virtual_machine=_nb_virtual_machine.id,
@@ -356,6 +419,9 @@ def _process_pve_virtual_machine_disk(
                 'backup': _has_backup,
             }
         )
+        if _nb_objects['default_tag_ids']:
+            payload['tags'] = _nb_objects['default_tag_ids']
+        _nb_api.virtualization.virtual_disks.create(**payload)
     else:
         nb_disk.size = _disk_size
         nb_disk.custom_fields['backup'] = _has_backup
@@ -431,6 +497,12 @@ def main():
     # Load NetBox objects
     nb_objects = _load_nb_objects(nb_api)
 
+    # Read default tags from env and ensure they exist
+    default_tag_names = [t.strip() for t in os.getenv('NB_SYNC_TAGS', '').split(',') if t.strip()]
+    _ensure_tags_exist(nb_api, nb_objects, default_tag_names)
+    # Map to IDs using the aliases we just established
+    nb_objects['default_tag_ids'] = [nb_objects['tags'][n].id for n in default_tag_names if n in nb_objects['tags']]
+
     # Process Proxmox tags
     _process_pve_tags(
         pve_api,
@@ -441,7 +513,8 @@ def main():
     # Fetch VM tags from Proxmox
     pve_vm_tags = {}
     for pve_vm_resource in pve_api.cluster.resources.get(type='vm'):
-        pve_vm_tags[pve_vm_resource['vmid']] = []
+        # Start each VM with the default tags
+        pve_vm_tags[pve_vm_resource['vmid']] = list(default_tag_names)
 
         if 'pool' in pve_vm_resource:
             pve_vm_tags[pve_vm_resource['vmid']].append(f'Pool/{pve_vm_resource["pool"]}')
