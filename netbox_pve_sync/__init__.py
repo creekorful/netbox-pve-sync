@@ -72,6 +72,27 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
 
     return _nb_objects
 
+def _slugify_tag(_name: str) -> str:
+    # keep simple & predictable; NetBox will enforce uniqueness
+    return (
+        _name.lower()
+        .replace(' ', '-')
+        .replace(':', '-')
+    )
+
+def _ensure_tags_exist(_nb_api: pynetbox.api, _nb_objects: dict, _names: list[str]) -> None:
+    """Create any missing tags and refresh the local tag cache."""
+    if not _names:
+        return
+    for _name in _names:
+        if _name in _nb_objects['tags']:
+            continue
+        _nb_tag = _nb_api.extras.tags.create(
+            name=_name,
+            slug=_slugify_tag(_name),
+            description=f'netbox-pve-sync default tag: {_name}',
+        )
+        _nb_objects['tags'][_nb_tag.name] = _nb_tag
 
 def _process_pve_tags(
         _pve_api: ProxmoxAPI,
