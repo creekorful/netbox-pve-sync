@@ -1,5 +1,6 @@
 # netbox-pve-sync
 
+<<<<<<< HEAD
 Synchronize Proxmox Virtual Environment (PVE) information to a NetBox instance.
 This allows automatic tracking of Virtual Machines, disks, IP addresses/prefixes, MAC addresses, VLANs, ...
 
