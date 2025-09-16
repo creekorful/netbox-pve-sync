@@ -12,6 +12,8 @@ import pynetbox
 import urllib3
 from proxmoxer import ProxmoxAPI, ResourceException
 
+import re
+from pynetbox.core.query import RequestError
 
 def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
     _nb_objects = {
@@ -73,26 +75,57 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
     return _nb_objects
 
 def _slugify_tag(_name: str) -> str:
-    # keep simple & predictable; NetBox will enforce uniqueness
-    return (
-        _name.lower()
-        .replace(' ', '-')
-        .replace(':', '-')
-    )
+    # approximate NetBox slug rules: lowercase, non-alnum -> single dash, trim
+    s = _name.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
 
 def _ensure_tags_exist(_nb_api: pynetbox.api, _nb_objects: dict, _names: list[str]) -> None:
-    """Create any missing tags and refresh the local tag cache."""
+    """
+    Ensure each requested tag exists in NetBox.
+    - Prefer exact NAME match from cache.
+    - Otherwise try SLUG lookup.
+    - Otherwise create; on conflict, resolve by fetching and caching.
+    Also: alias the resolved tag object under the *requested name* so later lookups
+    like _nb_objects['tags'][requested_name] work even if the actual tag has a different name.
+    """
     if not _names:
         return
     for _name in _names:
-        if _name in _nb_objects['tags']:
+        if not _name:
             continue
-        _nb_tag = _nb_api.extras.tags.create(
-            name=_name,
-            slug=_slugify_tag(_name),
-            description=f'netbox-pve-sync default tag: {_name}',
-        )
-        _nb_objects['tags'][_nb_tag.name] = _nb_tag
+        # 1) Already cached by this exact name?
+        _tag = _nb_objects['tags'].get(_name)
+        if _tag:
+            # also alias (no-op) and continue
+            _nb_objects['tags'][_name] = _tag
+            continue
+
+        # 2) Try slug lookup
+        _slug = _slugify_tag(_name)
+        _tag = _nb_api.extras.tags.get(slug=_slug)
+        if _tag:
+            # cache under its real name AND under the requested name (alias)
+            _nb_objects['tags'][_tag.name] = _tag
+            _nb_objects['tags'][_name] = _tag
+            continue
+
+        # 3) Create, but be resilient to races / conflicts
+        try:
+            _tag = _nb_api.extras.tags.create(
+                name=_name,
+                slug=_slug,
+                description=f'netbox-pve-sync default tag: {_name}',
+            )
+        except RequestError as e:
+            # If slug or name exists, fetch it and keep going
+            _tag = _nb_api.extras.tags.get(slug=_slug) or _nb_api.extras.tags.get(name=_name)
+            if _tag is None:
+                # unknown error → re-raise
+                raise
+        # cache under both keys
+        _nb_objects['tags'][_tag.name] = _tag
+        _nb_objects['tags'][_name] = _tag
 
 def _process_pve_tags(
         _pve_api: ProxmoxAPI,
