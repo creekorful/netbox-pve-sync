@@ -58,6 +58,10 @@ The following env variables will need to be set:
 - **PVE_API_TOKEN**: The name of the API token created previously. (ex: test-token)
 - **PVE_API_SECRET**: The API token created previously (ex: 4d46dc0a-6363-47a2-98df-d5cdfefa33d2)
 
+The following env variables can be set:
+
+- **NB_SYNC_TAGS**: Comma-separated list of tags you want applied to every synced object. (ex: Netbox-Synced)
+
 ## Executing the script
 
 You can then execute the script using the following command:

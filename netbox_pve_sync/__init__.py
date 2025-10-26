@@ -5,8 +5,9 @@ netbox-pve-sync: Synchronize Proxmox Virtual Environment (PVE) information to a 
 """
 
 import os
+import re
 import sys
-from typing import Optional
+from typing import Optional, List, Dict
 
 import pynetbox
 import urllib3
@@ -71,22 +72,41 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
     return _nb_objects
 
 
-def _process_pve_tags(
+def _process_tags(
         _pve_api: ProxmoxAPI,
         _nb_api: pynetbox.api,
         _nb_objects: dict,
+        _manual_tags: List[str],
 ) -> dict:
-    # TODO: First tags
+    _raw_tags = []
 
-    # Then pool (we treat them as tags)
+    # TODO: First process PVE tags
+
+    # Then PVE pools (we treat them as tags)
     for _pve_pool in _pve_api.pools.get():
-        _tag_name = f'Pool/{_pve_pool["poolid"]}'
+        _raw_tags.append({
+            'name': f'Pool/{_pve_pool["poolid"]}',
+            'slug': f'pool-{_pve_pool["poolid"]}'.lower(),
+            'description': f'Proxmox pool {_pve_pool["poolid"]}',
+        })
+
+    # Finally manually supplied tags
+    for _tag_name in _manual_tags:
+        _raw_tags.append({
+            'name': _tag_name,
+            'slug': re.sub(r"[^a-z0-9]+", "-", _tag_name).lower().strip("-"),
+            'description': f'netbox-pve-sync',
+        })
+
+    # Create or fetch the Netbox objects
+    for _raw_tag in _raw_tags:
+        _tag_name = _raw_tag['name']
         _nb_tag = _nb_objects['tags'].get(_tag_name)
         if _nb_tag is None:
             _nb_tag = _nb_api.extras.tags.create(
                 name=_tag_name,
-                slug=f'pool-{_pve_pool["poolid"]}'.lower(),
-                description=f'Proxmox pool {_pve_pool["poolid"]}',
+                slug=_raw_tag['slug'],
+                description=_raw_tag.get('description', ''),
             )
             _nb_objects['tags'][_nb_tag.name] = _nb_tag
 
@@ -98,7 +118,7 @@ def _process_pve_virtual_machine(
         _nb_api: pynetbox.api,
         _nb_objects: dict,
         _nb_device: any,
-        _pve_tags: [str],
+        _pve_tags: List[str],
         _pve_virtual_machine: dict,
         _is_replicated: bool,
         _has_ha: bool,
@@ -133,7 +153,7 @@ def _process_pve_virtual_machine(
             vcpus=_get_virtual_machine_vcpus(pve_virtual_machine_config),
             memory=int(pve_virtual_machine_config['memory']),
             status='active' if _pve_virtual_machine['status'] == 'running' else 'offline',
-            tags=list(map(lambda _pve_tag_name: _nb_objects['tags'][_pve_tag_name].id, _pve_tags)),
+            tags=_get_tags(_nb_objects, _pve_tags),
             custom_fields={
                 'autostart': pve_virtual_machine_config.get('onboot') == 1,
                 'replicated': _is_replicated,
@@ -148,7 +168,7 @@ def _process_pve_virtual_machine(
         nb_virtual_machine.vcpus = _get_virtual_machine_vcpus(pve_virtual_machine_config)
         nb_virtual_machine.memory = int(pve_virtual_machine_config['memory'])
         nb_virtual_machine.status = 'active' if _pve_virtual_machine['status'] == 'running' else 'offline'
-        nb_virtual_machine.tags = list(map(lambda _pve_tag_name: _nb_objects['tags'][_pve_tag_name].id, _pve_tags))
+        nb_virtual_machine.tags = _get_tags(_nb_objects, _pve_tags)
         nb_virtual_machine.custom_fields['autostart'] = pve_virtual_machine_config.get('onboot') == 1
         nb_virtual_machine.custom_fields['replicated'] = _is_replicated
         nb_virtual_machine.custom_fields['ha'] = _has_ha
@@ -217,7 +237,7 @@ def _process_pve_virtual_machine_network_interface(
         _nb_virtual_machine: any,
         _interface_name: str,
         _interface_mac_address: str,
-        _interface_vlan_id: Optional[int],
+        _interface_vlan_id: Optional[str],
         _pve_virtual_machine_ip_addresses: dict,
 ) -> dict:
     nb_virtual_machines_interface = _nb_objects['virtual_machines_interfaces'] \
@@ -229,6 +249,7 @@ def _process_pve_virtual_machine_network_interface(
             virtual_machine=_nb_virtual_machine.id,
             name=_interface_name,
             description=_interface_mac_address,
+            tags=_get_tags(_nb_objects, []),
         )
 
         if _nb_virtual_machine.id not in _nb_objects['virtual_machines_interfaces']:
@@ -236,6 +257,9 @@ def _process_pve_virtual_machine_network_interface(
 
         _nb_objects['virtual_machines_interfaces'][_nb_virtual_machine.id][
             _interface_name] = nb_virtual_machines_interface
+    else:
+        nb_virtual_machines_interface.tags = _get_tags(_nb_objects, [])
+        nb_virtual_machines_interface.save()
 
     # Create the MAC address and link it to the VM
     nb_mac_address = _nb_objects['mac_addresses'].get(_interface_mac_address)
@@ -244,12 +268,16 @@ def _process_pve_virtual_machine_network_interface(
             mac_address=_interface_mac_address,
             assigned_object_type='virtualization.vminterface',
             assigned_object_id=nb_virtual_machines_interface.id,
+            tags=_get_tags(_nb_objects, []),
         )
 
         _nb_objects['mac_addresses'][_interface_mac_address] = nb_mac_address
 
         nb_virtual_machines_interface.primary_mac_address = nb_mac_address.id
         nb_virtual_machines_interface.save()
+    else:
+        nb_mac_address.tags = _get_tags(_nb_objects, [])
+        nb_mac_address.save()
 
     # TODO: Improve Multiple IP address handling
     _pve_virtual_machine_ip_address = None
@@ -269,8 +297,14 @@ def _process_pve_virtual_machine_network_interface(
 
         nb_prefix = _nb_objects['prefixes'].get(_prefix_network_full_address)
         if nb_prefix is None:
-            nb_prefix = _nb_api.ipam.prefixes.create(prefix=_prefix_network_full_address)
+            nb_prefix = _nb_api.ipam.prefixes.create(
+                prefix=_prefix_network_full_address,
+                tags=_get_tags(_nb_objects, []),
+            )
             _nb_objects['prefixes'][nb_prefix.prefix] = nb_prefix
+        else:
+            nb_prefix.tags = _get_tags(_nb_objects, [])
+            nb_prefix.save()
 
         if 'dns_name' in nb_prefix.custom_fields and nb_prefix.custom_fields['dns_name'] is not None:
             ip_address_dns_name = f'{_nb_virtual_machine.name}.{nb_prefix.custom_fields["dns_name"]}'
@@ -283,13 +317,15 @@ def _process_pve_virtual_machine_network_interface(
                 address=_virtual_machine_full_address,
                 assigned_object_type='virtualization.vminterface',
                 assigned_object_id=nb_virtual_machines_interface.id,
-                dns_name=ip_address_dns_name
+                dns_name=ip_address_dns_name,
+                tags=_get_tags(_nb_objects, []),
             )
             _nb_objects['ip_addresses'][nb_ip_address.address] = nb_ip_address
         else:
             nb_ip_address.assigned_object_type = 'virtualization.vminterface'
             nb_ip_address.assigned_object_id = nb_virtual_machines_interface.id
             nb_ip_address.dns_name = ip_address_dns_name
+            nb_ip_address.tags = _get_tags(_nb_objects, [])
             nb_ip_address.save()
 
         _nb_virtual_machine.primary_ip4 = nb_ip_address.id
@@ -297,15 +333,17 @@ def _process_pve_virtual_machine_network_interface(
 
         # Handle VLAN
         if _interface_vlan_id is not None:
-            nb_vlan = _nb_objects['vlans'].get(str(_interface_vlan_id))
+            nb_vlan = _nb_objects['vlans'].get(_interface_vlan_id)
             if nb_vlan is None:
                 nb_vlan = _nb_api.ipam.vlans.create(
                     vid=_interface_vlan_id,
                     name=f'VLAN {_interface_vlan_id}',
+                    tags=_get_tags(_nb_objects, []),
                 )
                 _nb_objects['vlans'][_interface_vlan_id] = nb_vlan
 
             nb_prefix.vlan = nb_vlan.id
+            nb_prefix.tags = _get_tags(_nb_objects, [])
             nb_prefix.save()
 
     return _nb_objects
@@ -354,17 +392,19 @@ def _process_pve_virtual_machine_disk(
             virtual_machine=_nb_virtual_machine.id,
             custom_fields={
                 'backup': _has_backup,
-            }
+            },
+            tags=_get_tags(_nb_objects, []),
         )
     else:
         nb_disk.size = _disk_size
         nb_disk.custom_fields['backup'] = _has_backup
+        nb_disk.tags = _get_tags(_nb_objects, [])
         nb_disk.save()
 
     return _nb_objects
 
 
-def _parse_pve_network_definition(_raw_network_definition: str) -> dict:
+def _parse_pve_network_definition(_raw_network_definition: str) -> Dict[str, str]:
     _network_definition = {}
 
     for _component in _raw_network_definition.split(','):
@@ -408,6 +448,15 @@ def _get_virtual_machine_vcpus(_pve_virtual_machine_config: dict) -> int:
     return _pve_virtual_machine_config['cores'] * _pve_virtual_machine_config['sockets']
 
 
+def _get_tags(
+        _nb_objects: dict,
+        _tag_names: List[str],
+) -> List:
+    return list(
+        map(lambda _tag_name: _nb_objects['tags'][_tag_name].id, _tag_names + os.getenv('NB_SYNC_TAGS', '').split(','))
+    )
+
+
 def main():
     """
     netbox-pve-sync main entrypoint
@@ -432,10 +481,11 @@ def main():
     nb_objects = _load_nb_objects(nb_api)
 
     # Process Proxmox tags
-    _process_pve_tags(
+    _process_tags(
         pve_api,
         nb_api,
         nb_objects,
+        os.getenv('NB_SYNC_TAGS', '').split(',')
     )
 
     # Fetch VM tags from Proxmox
