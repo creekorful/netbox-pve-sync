@@ -318,21 +318,35 @@ def _process_pve_virtual_machine_disks(
         _nb_virtual_machine: any,
 ) -> dict:
     # Handle the VM disks
+    DISK_PREFIXES = ('scsi', 'virtio', 'sata', 'ide', 'nvme', 'efidisk', 'tpmstate')
     for (_config_key, _config_value) in _pve_virtual_machine_config.items():
-        if not _config_key.startswith('scsi'):
-            continue
         if _config_key == 'scsihw':
+            continue
+        if not _config_key.startswith(DISK_PREFIXES):
+            continue
+        if 'media=cdrom' in _config_value or _config_value.startswith('none'):
             continue
 
         _disk_definition = _parse_pve_disk_definition(_config_value)
+        if _disk_definition.get('media') == 'cdrom' or _disk_definition.get('name') in (None, 'none'):
+            continue
+        raw_size = _disk_definition.get('size')
+        if not raw_size:
+            continue
+        disk_size = _process_pve_disk_size(raw_size)
+        if disk_size is None or disk_size < 0:
+            continue
+        disk_name = _config_key
+        backend = _disk_definition.get('name')
 
         _process_pve_virtual_machine_disk(
             _nb_api,
             _nb_objects,
             _nb_virtual_machine,
-            _disk_definition['name'],
-            _process_pve_disk_size(_disk_definition['size']),
+            disk_name,
+            _process_pve_disk_size(raw_size),
             _disk_definition.get('backup', '1') == '1',
+            backend,
         )
 
     return _nb_objects
@@ -345,6 +359,7 @@ def _process_pve_virtual_machine_disk(
         _disk_name: str,
         _disk_size: int,
         _has_backup: bool,
+        _backend: str | None = None,
 ) -> dict:
     nb_disk = _nb_objects['disks'].get(_nb_virtual_machine.id, {}).get(_disk_name)
     if nb_disk is None:
@@ -352,6 +367,7 @@ def _process_pve_virtual_machine_disk(
             name=_disk_name,
             size=_disk_size,
             virtual_machine=_nb_virtual_machine.id,
+            description=_backend,
             custom_fields={
                 'backup': _has_backup,
             }
