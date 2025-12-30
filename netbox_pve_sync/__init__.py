@@ -12,6 +12,31 @@ import pynetbox
 import urllib3
 from proxmoxer import ProxmoxAPI, ResourceException
 
+import ipaddress
+
+def _normalize_mac(mac: str) -> str:
+     mac = (mac or "").strip()
+     if "=" in mac:
+         mac = mac.split("=", 1)[1]
+     if "," in mac:
+         mac = mac.split(",", 1)[0]
+     return mac.replace("-", ":").upper()
+
+def _pick_ipv4(ip_list):
+    for a in (ip_list or []):
+        if not isinstance(a, dict):
+            continue
+        if a.get('ip-address-type') != 'ipv4':
+            continue
+        ip = a.get('ip-address')
+        prefix = a.get('prefix')
+        if not ip or prefix is None:
+            continue
+        ip_obj = ipaddress.ip_address(ip)
+        if ip_obj.is_loopback or ip_obj.is_link_local:
+            continue
+        return a
+    return None
 
 def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
     _nb_objects = {
@@ -43,7 +68,9 @@ def _load_nb_objects(_nb_api: pynetbox.api) -> dict:
 
     # Load NetBox mac addresses
     for _nb_mac_address in _nb_api.dcim.mac_addresses.all():
-        _nb_objects['mac_addresses'][_nb_mac_address.mac_address] = _nb_mac_address
+        mac = _normalize_mac(_nb_mac_address.mac_address)
+        key = f"{_nb_mac_address.assigned_object_type}:{_nb_mac_address.assigned_object_id}:{mac}"
+        _nb_objects['mac_addresses'][key] = _nb_mac_address
 
     # Load NetBox IP ranges
     for _nb_prefix in _nb_api.ipam.prefixes.all():
@@ -118,8 +145,15 @@ def _process_pve_virtual_machine(
 
     # Extract IP addresses from QEMU
     pve_virtual_machine_ip_addresses = {}
-    for result in pve_virtual_machine_agent_interfaces['result']:
-        pve_virtual_machine_ip_addresses[result['name']] = result['ip-addresses']
+    pve_ip_by_mac = {}
+    for iface in pve_virtual_machine_agent_interfaces.get('result', []):
+        mac = _normalize_mac(iface.get('hardware-address'))  # у агента это поле обычно так называется
+        if not mac or mac == "00:00:00:00:00:00":
+            continue
+        name = iface.get("name") or ""
+        if name in ("lo", "docker0") or name.startswith(("veth", "br-")):
+            continue
+        pve_ip_by_mac[mac] = iface.get('ip-addresses', []) or []
 
     # Create the virtual machine if it exists, update it otherwise
     nb_virtual_machine = _nb_objects['virtual_machines'].get(str(_pve_virtual_machine['vmid']))
@@ -161,6 +195,7 @@ def _process_pve_virtual_machine(
         pve_virtual_machine_config,
         nb_virtual_machine,
         pve_virtual_machine_ip_addresses,
+        pve_ip_by_mac,
     )
 
     # Handle the VM disks
@@ -180,6 +215,7 @@ def _process_pve_virtual_machine_network_interfaces(
         _pve_virtual_machine_config: dict,
         _nb_virtual_machine: any,
         _pve_virtual_machine_ip_addresses: dict,
+        _pve_ip_by_mac: dict,
 ) -> dict:
     # Handle the VM network interfaces
     for (_config_key, _config_value) in _pve_virtual_machine_config.items():
@@ -206,6 +242,7 @@ def _process_pve_virtual_machine_network_interfaces(
             network_mac_address,
             _network_definition.get('tag'),
             _pve_virtual_machine_ip_addresses,
+            _pve_ip_by_mac,
         )
 
     return _nb_objects
@@ -219,6 +256,7 @@ def _process_pve_virtual_machine_network_interface(
         _interface_mac_address: str,
         _interface_vlan_id: Optional[int],
         _pve_virtual_machine_ip_addresses: dict,
+        _pve_ip_by_mac: dict,
 ) -> dict:
     nb_virtual_machines_interface = _nb_objects['virtual_machines_interfaces'] \
         .get(_nb_virtual_machine.id, {}) \
@@ -238,7 +276,9 @@ def _process_pve_virtual_machine_network_interface(
             _interface_name] = nb_virtual_machines_interface
 
     # Create the MAC address and link it to the VM
-    nb_mac_address = _nb_objects['mac_addresses'].get(_interface_mac_address)
+    _interface_mac_address = _normalize_mac(_interface_mac_address)
+    mac_key = f"virtualization.vminterface:{nb_virtual_machines_interface.id}:{_interface_mac_address}"
+    nb_mac_address = _nb_objects['mac_addresses'].get(mac_key)
     if nb_mac_address is None:
         nb_mac_address = _nb_api.dcim.mac_addresses.create(
             mac_address=_interface_mac_address,
@@ -246,30 +286,37 @@ def _process_pve_virtual_machine_network_interface(
             assigned_object_id=nb_virtual_machines_interface.id,
         )
 
-        _nb_objects['mac_addresses'][_interface_mac_address] = nb_mac_address
+        _nb_objects['mac_addresses'][mac_key] = nb_mac_address
 
         nb_virtual_machines_interface.primary_mac_address = nb_mac_address.id
         nb_virtual_machines_interface.save()
 
     # TODO: Improve Multiple IP address handling
-    _pve_virtual_machine_ip_address = None
-    for raw_interface_name in ['eth0', 'ens18', 'ens19']:
-        if raw_interface_name in _pve_virtual_machine_ip_addresses:
-            _pve_virtual_machine_ip_address = _pve_virtual_machine_ip_addresses[raw_interface_name][0]
-            break
+    ip_list = _pve_ip_by_mac.get(_normalize_mac(_interface_mac_address), [])
+    _pve_virtual_machine_ip_address = _pick_ipv4(ip_list)
+
+    if _pve_virtual_machine_ip_address is None:
+        return _nb_objects
+    _touched_prefixes = set()
 
     if _pve_virtual_machine_ip_address is not None:
         _virtual_machine_address = _pve_virtual_machine_ip_address['ip-address']
         _virtual_machine_address_mask = _pve_virtual_machine_ip_address['prefix']
         _virtual_machine_full_address = f'{_virtual_machine_address}/{_virtual_machine_address_mask}'
 
-        # First, determinate if the prefix exists
-        _prefix_network_address = '.'.join(_virtual_machine_address.split('.')[:-1]) + '.0'
-        _prefix_network_full_address = f'{_prefix_network_address}/{_virtual_machine_address_mask}'
+        # First, determinate if the prefix exists  (NORMALIZE)
+        try:
+            _prefix_network_full_address = str(ipaddress.ip_interface(_virtual_machine_full_address).network)
+        except ValueError:
+            return _nb_objects
 
         nb_prefix = _nb_objects['prefixes'].get(_prefix_network_full_address)
         if nb_prefix is None:
-            nb_prefix = _nb_api.ipam.prefixes.create(prefix=_prefix_network_full_address)
+            existing = list(_nb_api.ipam.prefixes.filter(prefix=_prefix_network_full_address, limit=1))
+            if existing:
+                nb_prefix = existing[0]
+            else:
+                nb_prefix = _nb_api.ipam.prefixes.create(prefix=_prefix_network_full_address)
             _nb_objects['prefixes'][nb_prefix.prefix] = nb_prefix
 
         if 'dns_name' in nb_prefix.custom_fields and nb_prefix.custom_fields['dns_name'] is not None:
@@ -277,13 +324,14 @@ def _process_pve_virtual_machine_network_interface(
         else:
             ip_address_dns_name = ''
 
+        changed = False
         nb_ip_address = _nb_objects['ip_addresses'].get(_virtual_machine_full_address)
         if nb_ip_address is None:
             nb_ip_address = _nb_api.ipam.ip_addresses.create(
                 address=_virtual_machine_full_address,
                 assigned_object_type='virtualization.vminterface',
                 assigned_object_id=nb_virtual_machines_interface.id,
-                dns_name=ip_address_dns_name
+                dns_name=(ip_address_dns_name or ""),
             )
             _nb_objects['ip_addresses'][nb_ip_address.address] = nb_ip_address
         else:
