@@ -408,6 +408,13 @@ def _get_virtual_machine_vcpus(_pve_virtual_machine_config: dict) -> int:
     return _pve_virtual_machine_config['cores'] * _pve_virtual_machine_config['sockets']
 
 
+def _delete_vms_not_on_proxmox(_nb_api: pynetbox.api, _nb_objects: dict, vms_on_pvx: list):
+    for vm in _nb_objects['virtual_machines']:
+        if vm not in vms_on_pvx or vm == "":
+             nb_virtual_machine = _nb_objects['virtual_machines'].get(str(vm))
+             _nb_api.virtualization.virtual_machines.filter(name=nb_virtual_machine).delete()
+
+                             
 def main():
     """
     netbox-pve-sync main entrypoint
@@ -471,6 +478,9 @@ def main():
             nb_device.status = 'active' if pve_node['status'] == 'online' else 'offline'
             nb_device.save()
 
+        # VM IDs needed for delete
+        vm_ids =  []
+
         # Process Proxmox virtual machines per node
         for pve_virtual_machine in pve_api.nodes(pve_node['node']).qemu.get():
             _process_pve_virtual_machine(
@@ -483,6 +493,9 @@ def main():
                 pve_virtual_machine['vmid'] in pve_replicated_virtual_machine_ids,
                 pve_virtual_machine['vmid'] in pve_ha_virtual_machine_ids,
             )
+            vm_ids.append(str(pve_virtual_machine['vmid']))
+
+        _delete_vms_not_on_proxmox(nb_api, nb_objects, vm_ids)
 
 
 if __name__ == '__main__':
