@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow VM disk sizes in Kilobytes and plain bytes.
+- Skip VM disks without a size or with an unknown size format instead of aborting the sync.
+- Do not sync SCSI CD-ROM drives as VM disks.
+
+### Security
+
+- Require requests >= 2.33.0 (CVE-2024-47081, CVE-2026-25645). Python >= 3.10 is now required.
+
 ## [0.2.4] - 02/09/2025
 
 ### Fixed

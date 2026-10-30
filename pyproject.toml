@@ -12,7 +12,7 @@ authors = [
 ]
 description = "Synchronize Proxmox Virtual Environment (PVE) information to a NetBox instance"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
     "pynetbox>=7.4",
     "proxmoxer>=2.2",
-    "requests>=2.32",
+    "requests>=2.33.0",
 ]
 
 [project.urls]

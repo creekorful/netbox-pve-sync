@@ -326,12 +326,24 @@ def _process_pve_virtual_machine_disks(
 
         _disk_definition = _parse_pve_disk_definition(_config_value)
 
+        # CD-ROM drives are not VM disks
+        if _disk_definition.get('media') == 'cdrom':
+            continue
+
+        # Skip disks without a size or with an unknown size format instead of aborting the whole sync
+        _raw_disk_size = _disk_definition.get('size', '')
+        _disk_size = _process_pve_disk_size(_raw_disk_size) if _raw_disk_size else -1
+        if _disk_size < 0:
+            print(f'Unknown size "{_raw_disk_size}" for disk {_config_key} '
+                  f'of VM {_nb_virtual_machine.name}. Skipping.')
+            continue
+
         _process_pve_virtual_machine_disk(
             _nb_api,
             _nb_objects,
             _nb_virtual_machine,
             _disk_definition['name'],
-            _process_pve_disk_size(_disk_definition['size']),
+            _disk_size,
             _disk_definition.get('backup', '1') == '1',
         )
 
@@ -388,9 +400,15 @@ def _parse_pve_disk_definition(_raw_disk_definition: str) -> dict:
 
 
 def _process_pve_disk_size(_raw_disk_size: str) -> int:
+    # PVE uses the largest unit that divides the size evenly, plain digits are bytes
+    if _raw_disk_size.isdigit():
+        return int(_raw_disk_size) // 1024 // 1024
+
     size = _raw_disk_size[:-1]
     size_unit = _raw_disk_size[-1]
 
+    if size_unit == 'K':
+        return int(size) // 1024
     if size_unit == 'M':
         return int(size)
     if size_unit == 'G':
